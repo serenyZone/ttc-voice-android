@@ -18,6 +18,15 @@
 xmlns:tools="http://schemas.android.com/tools">
 
 <uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" 
+    android:maxSdkVersion="29" />
+<!-- 对于Android 10及以上版本，如果需要更广泛的存储访问 -->
+<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
+    tools:ignore="ScopedStorage" />
+<!-- 悬浮窗权限 -->
+<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
 <application
   android:name=".PokedexApp"
@@ -27,11 +36,13 @@ xmlns:tools="http://schemas.android.com/tools">
   android:label="@string/app_name"
   android:supportsRtl="true"
   android:theme="@style/Theme.PokedexCompose"
+  android:requestLegacyExternalStorage="true"
   tools:ignore="AllowBackup">
 
   <activity
     android:name=".MainActivity"
     android:exported="true"
+    android:windowSoftInputMode="adjustResize"
     android:launchMode="singleTop">
     <intent-filter>
       <action android:name="android.intent.action.MAIN" />

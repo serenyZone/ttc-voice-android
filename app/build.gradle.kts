@@ -21,6 +21,21 @@ android {
     testInstrumentationRunner = "com.skydoves.pokedex.compose.AppTestRunner"
   }
 
+  // 添加顶级packaging配置，应用于所有构建类型
+  packaging {
+    resources {
+      excludes += listOf(
+        "META-INF/DEPENDENCIES",
+        "META-INF/LICENSE",
+        "META-INF/LICENSE.txt",
+        "META-INF/NOTICE",
+        "META-INF/NOTICE.txt",
+        "META-INF/INDEX.LIST",
+        "META-INF/ASL2.0"
+      )
+    }
+  }
+
   signingConfigs {
     val properties = Properties()
     val localPropertyFile = project.rootProject.file("local.properties")
@@ -87,6 +102,21 @@ android {
   }
 }
 
+// 解决 Guava 和 ListenableFuture 依赖冲突
+configurations.all {
+  resolutionStrategy {
+    // 强制使用特定版本的 listenablefuture，避免与 guava 冲突
+    force("com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava")
+    // 或者可以完全排除 listenablefuture:1.0
+    exclude(group = "com.google.guava", module = "listenablefuture")
+    
+    // 处理Apache HttpComponents依赖冲突
+    force("org.apache.httpcomponents:httpclient:4.5.13")
+    force("org.apache.httpcomponents:httpcore:4.4.15")
+    force("org.apache.httpcomponents:httpmime:4.5.13")
+  }
+}
+
 dependencies {
   // features
   implementation(projects.feature.home)
@@ -96,6 +126,11 @@ dependencies {
   implementation(projects.core.model)
   implementation(projects.core.designsystem)
   implementation(projects.core.navigation)
+  
+  // 引入本地JAR文件
+  // implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
+  // 或者引入单个JAR文件，将YOUR_JAR_FILE替换为实际的JAR文件名
+  // implementation(files("libs/YOUR_JAR_FILE.jar"))
 
   // compose
   implementation(libs.androidx.activity.compose)

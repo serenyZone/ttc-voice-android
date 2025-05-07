@@ -83,6 +83,9 @@ dependencyResolutionManagement {
         snapshotsOnly()
       }
     }
+    
+    // JitPack repository for EasyFloat
+    maven(url = "https://jitpack.io")
   }
 }
 rootProject.name = "pokedex-compose"

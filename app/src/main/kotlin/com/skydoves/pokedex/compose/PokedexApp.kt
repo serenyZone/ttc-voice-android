@@ -18,6 +18,37 @@ package com.skydoves.pokedex.compose
 
 import android.app.Application
 import dagger.hilt.android.HiltAndroidApp
+import android.util.Log
+import com.skydoves.pokedex.compose.feature.home.VoiceRecognitionViewModel
 
+/**
+ * 应用程序入口类
+ */
 @HiltAndroidApp
-class PokedexApp : Application()
+class PokedexApp : Application() {
+    private val TAG = "PokedexApp"
+    
+    // 保存ViewModel实例的引用
+    @Volatile
+    private var voiceViewModel: VoiceRecognitionViewModel? = null
+    
+    /**
+     * 注册ViewModel实例，通常由ViewModel本身在初始化时调用
+     */
+    fun registerVoiceViewModel(viewModel: VoiceRecognitionViewModel) {
+        Log.d(TAG, "注册VoiceViewModel: $viewModel")
+        voiceViewModel = viewModel
+    }
+    
+    /**
+     * 获取ViewModel实例
+     */
+    fun getVoiceViewModel(): VoiceRecognitionViewModel? {
+        return voiceViewModel
+    }
+    
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "PokedexApp 创建")
+    }
+}
