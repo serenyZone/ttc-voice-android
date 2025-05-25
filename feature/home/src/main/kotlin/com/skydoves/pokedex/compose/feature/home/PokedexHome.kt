@@ -114,7 +114,8 @@ import kotlinx.coroutines.launch
 // 定义Tab选项
 enum class HomeTab {
   VOICE_RECOGNITION,
-  AI_CHAT
+  AI_CHAT,
+  SESSION_HISTORY
 }
 
 @OptIn(ExperimentalPagerApi::class)
@@ -197,6 +198,16 @@ fun HomeScreen(
           },
           text = { Text("AI") }
         )
+        Tab(
+          selected = selectedTab == HomeTab.SESSION_HISTORY,
+          onClick = { 
+            selectedTab = HomeTab.SESSION_HISTORY 
+            coroutineScope.launch {
+              pagerState.animateScrollToPage(HomeTab.SESSION_HISTORY.ordinal)
+            }
+          },
+          text = { Text("历史") }
+        )
       }
     }
   ) { paddingValues ->
@@ -221,6 +232,22 @@ fun HomeScreen(
             })
           HomeTab.AI_CHAT -> 
             AIChatScreen(voiceViewModel, aiViewModel)
+          HomeTab.SESSION_HISTORY ->
+            SessionHistoryScreen(
+              onBackClick = { 
+                selectedTab = HomeTab.VOICE_RECOGNITION
+                coroutineScope.launch {
+                  pagerState.animateScrollToPage(HomeTab.VOICE_RECOGNITION.ordinal)
+                }
+              },
+              onSessionClick = { sessionId ->
+                voiceViewModel.loadSession(sessionId)
+                selectedTab = HomeTab.VOICE_RECOGNITION
+                coroutineScope.launch {
+                  pagerState.animateScrollToPage(HomeTab.VOICE_RECOGNITION.ordinal)
+                }
+              }
+            )
         }
       }
     }
@@ -303,11 +330,15 @@ fun AudioRecorderScreen(
       ChatInputField(
         onMessageSent = { /* No direct sending from here */ },
         isRecording = isRecording,
-        onStartRecording = {
+        onStartRecording = { recordingType ->
           if (!hasRecordingPermission) {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
           } else {
-            viewModel.startRecording()
+            // 如果当前有会话且不在录音状态，开始新会话
+            if (viewModel.currentSessionId.value != null && !isRecording) {
+              viewModel.startNewSession()
+            }
+            viewModel.startRecording(recordingType)
           }
         },
         onStopRecording = { viewModel.stopRecording() },
@@ -337,7 +368,7 @@ fun AudioRecorderScreen(
 internal fun ChatInputField(
   onMessageSent: (String) -> Unit,
   isRecording: Boolean = false,
-  onStartRecording: (source: RecordingType) -> Unit = {},
+  onStartRecording: (RecordingType) -> Unit = {},
   onStopRecording: () -> Unit = {},
   onFocusGained: () -> Unit = {},
   focusManager: FocusManager = LocalFocusManager.current,

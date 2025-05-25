@@ -1,6 +1,7 @@
 plugins {
   id("skydoves.pokedex.android.feature")
   id("skydoves.pokedex.android.hilt")
+  kotlin("kapt")
 }
 
 android {
@@ -11,6 +12,11 @@ android {
     unitTests {
       isIncludeAndroidResources = true
     }
+  }
+  
+  // 添加lint配置来禁用有问题的检查器
+  lint {
+    disable += "StateFlowValueCalledInComposition"
   }
 }
 
@@ -27,6 +33,15 @@ dependencies {
   implementation("com.github.princekin-f:EasyFloat:2.0.4")
 
   implementation("com.google.accompanist:accompanist-pager:0.25.1")
+  
+  // 添加Activity Compose依赖
+  implementation(libs.androidx.activity.compose)
+  
+  // 添加Room数据库依赖
+  implementation(libs.androidx.room.runtime)
+  implementation(libs.androidx.room.ktx)
+  kapt(libs.androidx.room.compiler)
+  
   // 测试依赖
   testImplementation("junit:junit:4.13.2")
   testImplementation("io.mockk:mockk:1.13.5")

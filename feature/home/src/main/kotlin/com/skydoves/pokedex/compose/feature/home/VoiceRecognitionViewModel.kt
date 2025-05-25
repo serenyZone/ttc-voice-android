@@ -28,6 +28,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.skydoves.pokedex.compose.core.viewmodel.BaseViewModel
 import com.skydoves.pokedex.compose.core.viewmodel.ViewModelStateFlow
+import com.skydoves.pokedex.compose.feature.home.data.SessionRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
@@ -52,6 +53,7 @@ class VoiceRecognitionViewModel @Inject constructor(
   @Named("uplink") private val uplinkAudioRecorder: AudioRecorder,
   @Named("downlink") private val downlinkAudioRecorder: AudioRecorder,
   private val speechRecognitionApi: SpeechRecognitionApi,
+  private val sessionRepository: SessionRepository,
   @ApplicationContext private val context: Context
 ) : BaseViewModel() {
   companion object{
@@ -61,6 +63,10 @@ class VoiceRecognitionViewModel @Inject constructor(
     const val AI_SPEAKER_ID = -2
   }
   internal val uiState: ViewModelStateFlow<HomeUiState> = viewModelStateFlow(HomeUiState.Idle)
+  
+  // 当前会话ID
+  private val _currentSessionId = MutableStateFlow<Long?>(null)
+  val currentSessionId: StateFlow<Long?> = _currentSessionId.asStateFlow()
   
   // Combined message list for both voice and AI chat (managed here)
   private val _recognitionMessages = MutableStateFlow<List<RecognitionMessage>>(emptyList())
@@ -195,6 +201,27 @@ class VoiceRecognitionViewModel @Inject constructor(
     }
     if (_isRecording.value) return
     
+    // 首先设置为Loading状态
+    uiState.tryEmit(key, HomeUiState.Loading)
+    
+    // 创建新会话并开始录音
+    viewModelScope.launch {
+      try {
+        val sessionId = sessionRepository.createSession(recordingType.name)
+        _currentSessionId.value = sessionId
+        Log.d(TAG, "创建新会话: $sessionId, 录音类型: ${recordingType.name}")
+        
+        // 会话创建成功后开始录音
+        startRecordingWithSession(recordingType)
+        
+      } catch (e: Exception) {
+        Log.e(TAG, "创建会话失败", e)
+        uiState.tryEmit(key, HomeUiState.Error("创建会话失败: ${e.message}"))
+      }
+    }
+  }
+  
+  private suspend fun startRecordingWithSession(recordingType: RecordingType) {
     // 系统通话录音需要特殊处理（同时监听上下行）
     if (recordingType == RecordingType.SYSTEM_CALL) {
       startSystemCallRecording()
@@ -210,9 +237,6 @@ class VoiceRecognitionViewModel @Inject constructor(
     }
     
     Log.d(TAG, "开始录音，类型: $recordingType")
-    
-    // 首先设置为Loading状态
-    uiState.tryEmit(key, HomeUiState.Loading)
     
     recordingJob = viewModelScope.launch {
       try {
@@ -237,6 +261,17 @@ class VoiceRecognitionViewModel @Inject constructor(
             )
             updateOrAddMessage(newMessage)
             
+            // 保存识别消息到数据库
+            _currentSessionId.value?.let { sessionId ->
+              sessionRepository.addRecognitionMessage(
+                sessionId = sessionId,
+                speakerId = result.speakerId,
+                text = result.text,
+                sentenceId = result.sentenceId,
+                beginTime = result.beginTime
+              )
+            }
+            
             // 如果在后台模式，实时更新浮窗文本
             if (_isInBackground.value) {
               FloatingWindowManager.updateRecognizedText(result.text)
@@ -254,7 +289,12 @@ class VoiceRecognitionViewModel @Inject constructor(
       } catch (e: Exception) {
         Log.e(TAG,"record error",e)
         uiState.tryEmit(key, HomeUiState.Error(e.message))
-        _isRecording.value = false 
+        _isRecording.value = false
+        
+        // 结束会话并标记为错误
+        _currentSessionId.value?.let { sessionId ->
+          sessionRepository.endSession(sessionId, "ERROR")
+        }
       }
     }
   }
@@ -262,11 +302,8 @@ class VoiceRecognitionViewModel @Inject constructor(
   /**
    * 同时启动系统上行和下行通道的录音并分别识别
    */
-  private fun startSystemCallRecording() {
+  private suspend fun startSystemCallRecording() {
     Log.d(TAG, "开始系统通话录音（同时监听上下行）")
-    
-    // 首先设置为Loading状态
-    uiState.tryEmit(key, HomeUiState.Loading)
     
     recordingJob = viewModelScope.launch {
       try {
@@ -293,6 +330,17 @@ class VoiceRecognitionViewModel @Inject constructor(
                 )
                 updateOrAddMessage(newMessage)
                 
+                // 保存识别消息到数据库
+                _currentSessionId.value?.let { sessionId ->
+                  sessionRepository.addRecognitionMessage(
+                    sessionId = sessionId,
+                    speakerId = 1,
+                    text = result.text,
+                    sentenceId = result.sentenceId,
+                    beginTime = result.beginTime
+                  )
+                }
+                
                 // 如果在后台模式，实时更新浮窗文本
                 if (_isInBackground.value) {
                   FloatingWindowManager.updateRecognizedText(result.text)
@@ -318,6 +366,17 @@ class VoiceRecognitionViewModel @Inject constructor(
                   beginTime = result.beginTime
                 )
                 updateOrAddMessage(newMessage)
+                
+                // 保存识别消息到数据库
+                _currentSessionId.value?.let { sessionId ->
+                  sessionRepository.addRecognitionMessage(
+                    sessionId = sessionId,
+                    speakerId = 2,
+                    text = result.text,
+                    sentenceId = result.sentenceId,
+                    beginTime = result.beginTime
+                  )
+                }
               }
               .launchIn(this)
           } catch (e: Exception) {
@@ -336,6 +395,11 @@ class VoiceRecognitionViewModel @Inject constructor(
         Log.e(TAG, "系统通话录音错误", e)
         uiState.tryEmit(key, HomeUiState.Error(e.message))
         _isRecording.value = false
+        
+        // 结束会话并标记为错误
+        _currentSessionId.value?.let { sessionId ->
+          sessionRepository.endSession(sessionId, "ERROR")
+        }
       }
     }
   }
@@ -350,6 +414,13 @@ class VoiceRecognitionViewModel @Inject constructor(
         try { micAudioRecorder.stopRecording() } catch (e: Exception) { }
         try { uplinkAudioRecorder.stopRecording() } catch (e: Exception) { }
         try { downlinkAudioRecorder.stopRecording() } catch (e: Exception) { }
+        
+        // 结束当前会话
+        _currentSessionId.value?.let { sessionId ->
+          sessionRepository.endSession(sessionId, "COMPLETED")
+          Log.d(TAG, "结束会话: $sessionId")
+        }
+        
       } finally {
         _isRecording.value = false
         uiState.tryEmit(key, HomeUiState.Idle)
@@ -380,10 +451,37 @@ class VoiceRecognitionViewModel @Inject constructor(
   fun addUserMessage(text: String) {
      val userMessage = RecognitionMessage(USER_SPEAKER_ID, text, System.currentTimeMillis().toInt(), System.currentTimeMillis())
      _recognitionMessages.value = _recognitionMessages.value + userMessage
+     
+     // 保存用户消息到数据库
+     _currentSessionId.value?.let { sessionId ->
+       viewModelScope.launch {
+         sessionRepository.addAiChatMessage(
+           sessionId = sessionId,
+           speakerId = USER_SPEAKER_ID,
+           text = text,
+           sentenceId = System.currentTimeMillis().toInt(),
+           beginTime = System.currentTimeMillis()
+         )
+       }
+     }
   }
 
   fun updateOrAddAiMessage(aiMessage: RecognitionMessage) {
       updateOrAddMessage(aiMessage)
+      
+      // 保存AI消息到数据库
+      _currentSessionId.value?.let { sessionId ->
+        viewModelScope.launch {
+          sessionRepository.addAiChatMessage(
+            sessionId = sessionId,
+            speakerId = aiMessage.speakerId,
+            text = aiMessage.text,
+            sentenceId = aiMessage.sentenceId,
+            beginTime = aiMessage.beginTime,
+            isStreaming = aiMessage.isStreaming
+          )
+        }
+      }
   }
 
   fun finishAiStreaming(aiMessageId: Int) {
@@ -393,6 +491,61 @@ class VoiceRecognitionViewModel @Inject constructor(
           updatedList[index].isStreaming = false
           _recognitionMessages.value = updatedList
       }
+  }
+  
+  /**
+   * 加载历史会话
+   */
+  fun loadSession(sessionId: Long) {
+    viewModelScope.launch {
+      try {
+        sessionRepository.getSessionDetail(sessionId).collect { sessionDetail ->
+          sessionDetail?.let { detail ->
+            _currentSessionId.value = sessionId
+            
+            // 合并识别消息和AI聊天消息
+            val recognitionMessages = detail.recognitionMessages.map { entity ->
+              RecognitionMessage(
+                speakerId = entity.speakerId,
+                text = entity.text,
+                sentenceId = entity.sentenceId,
+                beginTime = entity.beginTime,
+                isStreaming = entity.isStreaming
+              )
+            }
+            
+            val aiChatMessages = detail.aiChatMessages.map { entity ->
+              RecognitionMessage(
+                speakerId = entity.speakerId,
+                text = entity.text,
+                sentenceId = entity.sentenceId,
+                beginTime = entity.beginTime,
+                isStreaming = entity.isStreaming
+              )
+            }
+            
+            // 按时间排序合并所有消息
+            val allMessages = (recognitionMessages + aiChatMessages)
+              .sortedBy { it.beginTime }
+            
+            _recognitionMessages.value = allMessages
+            Log.d(TAG, "加载历史会话: $sessionId, 消息数量: ${allMessages.size}")
+          }
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "加载会话失败", e)
+        uiState.tryEmit(key, HomeUiState.Error("加载会话失败: ${e.message}"))
+      }
+    }
+  }
+  
+  /**
+   * 开始新会话（清空当前消息）
+   */
+  fun startNewSession() {
+    _currentSessionId.value = null
+    _recognitionMessages.value = emptyList()
+    Log.d(TAG, "开始新会话，清空消息列表")
   }
 
   internal fun updateOrAddMessage(newMessage: RecognitionMessage) {
