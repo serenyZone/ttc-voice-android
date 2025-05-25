@@ -18,15 +18,16 @@ package com.skydoves.pokedex.compose.feature.home.di
 
 import com.skydoves.pokedex.compose.feature.home.AudioRecorder
 import com.skydoves.pokedex.compose.feature.home.AudioRecorderImpl
-import com.skydoves.pokedex.compose.feature.home.MockAudioRecorder
-import com.skydoves.pokedex.compose.feature.home.MockSpeechRecognitionApi
 import com.skydoves.pokedex.compose.feature.home.SpeechRecognitionApi
 import com.skydoves.pokedex.compose.feature.home.XfyunSpeechRecognitionApi
+import com.skydoves.pokedex.compose.feature.home.SystemUplinkAudioRecorder
+import com.skydoves.pokedex.compose.feature.home.SystemDownlinkAudioRecorder
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import javax.inject.Named
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -34,8 +35,23 @@ abstract class HomeModule {
   
   @Binds
   @Singleton
-  abstract fun bindAudioRecorder(
+  @Named("mic")
+  abstract fun bindMicAudioRecorder(
     audioRecorder: AudioRecorderImpl
+  ): AudioRecorder
+  
+  @Binds
+  @Singleton
+  @Named("uplink")
+  abstract fun bindUplinkAudioRecorder(
+    audioRecorder: SystemUplinkAudioRecorder
+  ): AudioRecorder
+  
+  @Binds
+  @Singleton
+  @Named("downlink")
+  abstract fun bindDownlinkAudioRecorder(
+    audioRecorder: SystemDownlinkAudioRecorder
   ): AudioRecorder
   
   @Binds

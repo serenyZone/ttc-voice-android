@@ -22,6 +22,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -37,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -51,6 +56,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -78,6 +84,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -329,7 +337,7 @@ fun AudioRecorderScreen(
 internal fun ChatInputField(
   onMessageSent: (String) -> Unit,
   isRecording: Boolean = false,
-  onStartRecording: () -> Unit = {},
+  onStartRecording: (source: RecordingType) -> Unit = {},
   onStopRecording: () -> Unit = {},
   onFocusGained: () -> Unit = {},
   focusManager: FocusManager = LocalFocusManager.current,
@@ -338,6 +346,22 @@ internal fun ChatInputField(
   var message by remember { mutableStateOf("") }
   val keyboardController = LocalSoftwareKeyboardController.current
   val focusRequester = remember { FocusRequester() }
+  var isButtonsExpanded by remember { mutableStateOf(false) }
+  
+  // 添加动画过渡
+  val transition = updateTransition(isButtonsExpanded, label = "按钮展开过渡")
+  val micButtonOffset by transition.animateFloat(
+    label = "麦克风按钮偏移",
+    transitionSpec = { tween(durationMillis = 300, easing = FastOutSlowInEasing) }
+  ) { expanded -> if (expanded) -80f else 0f }
+  val callButtonOffset by transition.animateFloat(
+    label = "通话按钮偏移",
+    transitionSpec = { tween(durationMillis = 300, easing = FastOutSlowInEasing) }
+  ) { expanded -> if (expanded) -160f else 0f }
+  val mainButtonRotation by transition.animateFloat(
+    label = "主按钮旋转",
+    transitionSpec = { tween(durationMillis = 300) }
+  ) { expanded -> if (expanded) 45f else 0f }
   
   Row(
     modifier = Modifier
@@ -378,7 +402,7 @@ internal fun ChatInputField(
       )
     )
     
-    // 录音/发送按钮
+    // 录音/发送按钮区域
     if (isRecording) {
       // 录音中，显示停止按钮
       FloatingActionButton(
@@ -405,18 +429,88 @@ internal fun ChatInputField(
         )
       }
     } else {
-      // 普通状态 - 显示开始录音按钮
-      FloatingActionButton(
-        onClick = onStartRecording,
-        modifier = Modifier.size(48.dp),
-        shape = CircleShape,
-        containerColor = MaterialTheme.colorScheme.primary
+      // 按钮组区域
+      Box(
+        modifier = Modifier
+          .size(80.dp),
+        contentAlignment = Alignment.BottomCenter
       ) {
-        Icon(
-          imageVector = Icons.Filled.Call,
-          contentDescription = "开始录音",
-          tint = Color.White
-        )
+        // 麦克风录音按钮
+        Column(
+          modifier = Modifier
+            .offset(y = micButtonOffset.dp)
+            .alpha(if (isButtonsExpanded) 1f else 0f),
+          horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+          FloatingActionButton(
+            onClick = { 
+              onStartRecording(RecordingType.MICROPHONE)
+              isButtonsExpanded = false
+            },
+            modifier = Modifier.size(48.dp),
+            shape = CircleShape,
+            containerColor = MaterialTheme.colorScheme.primary
+          ) {
+            Icon(
+              imageVector = Icons.Filled.PlayArrow,
+              contentDescription = "麦克风录音",
+              tint = Color.White
+            )
+          }
+          Spacer(modifier = Modifier.height(4.dp))
+          Text(
+            text = "麦克风",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 10.sp
+          )
+        }
+        
+        // 系统声音录音按钮
+        Column(
+          modifier = Modifier
+            .offset(y = callButtonOffset.dp)
+            .alpha(if (isButtonsExpanded) 1f else 0f),
+          horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+          FloatingActionButton(
+            onClick = { 
+              onStartRecording(RecordingType.SYSTEM_CALL)
+              isButtonsExpanded = false
+            },
+            modifier = Modifier.size(48.dp),
+            shape = CircleShape,
+            containerColor = MaterialTheme.colorScheme.secondary
+          ) {
+            Icon(
+              imageVector = Icons.Filled.Call,
+              contentDescription = "通话录音",
+              tint = Color.White
+            )
+          }
+          Spacer(modifier = Modifier.height(4.dp))
+          Text(
+            text = "通话",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 10.sp
+          )
+        }
+        
+        // 主录音按钮
+        FloatingActionButton(
+          onClick = { isButtonsExpanded = !isButtonsExpanded },
+          modifier = Modifier.size(56.dp),
+          shape = CircleShape,
+          containerColor = MaterialTheme.colorScheme.primary
+        ) {
+          Icon(
+            imageVector = Icons.Filled.PlayArrow,
+            contentDescription = "开始录音",
+            tint = Color.White,
+            modifier = Modifier.rotate(mainButtonRotation)
+          )
+        }
       }
     }
   }

@@ -43,11 +43,14 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import javax.inject.Named
 
 
 @HiltViewModel
 class VoiceRecognitionViewModel @Inject constructor(
-  private val audioRecorder: AudioRecorder,
+  @Named("mic") private val micAudioRecorder: AudioRecorder,
+  @Named("uplink") private val uplinkAudioRecorder: AudioRecorder,
+  @Named("downlink") private val downlinkAudioRecorder: AudioRecorder,
   private val speechRecognitionApi: SpeechRecognitionApi,
   @ApplicationContext private val context: Context
 ) : BaseViewModel() {
@@ -87,6 +90,9 @@ class VoiceRecognitionViewModel @Inject constructor(
   val permissionState: StateFlow<PermissionState> = _permissionState
   
   private var recordingJob: Job? = null
+  
+  // 当前使用的录音器
+  private var currentAudioRecorder: AudioRecorder = micAudioRecorder
   
   init {
     // 将自身注册到Application中供全局访问
@@ -178,6 +184,10 @@ class VoiceRecognitionViewModel @Inject constructor(
   }
   
   fun startRecording() {
+    startRecording(RecordingType.MICROPHONE)
+  }
+  
+  fun startRecording(recordingType: RecordingType) {
     if (_permissionState.value != PermissionState.GRANTED) {
       Log.e(TAG, "没有足够的权限进行录音")
       uiState.tryEmit(key, HomeUiState.Error("没有足够的权限进行录音"))
@@ -185,12 +195,28 @@ class VoiceRecognitionViewModel @Inject constructor(
     }
     if (_isRecording.value) return
     
+    // 系统通话录音需要特殊处理（同时监听上下行）
+    if (recordingType == RecordingType.SYSTEM_CALL) {
+      startSystemCallRecording()
+      return
+    }
+    
+    // 设置当前录音器
+    currentAudioRecorder = when (recordingType) {
+      RecordingType.MICROPHONE -> micAudioRecorder
+      RecordingType.SYSTEM_UPLINK -> uplinkAudioRecorder
+      RecordingType.SYSTEM_DOWNLINK -> downlinkAudioRecorder
+      RecordingType.SYSTEM_CALL -> micAudioRecorder // 不会执行到这里
+    }
+    
+    Log.d(TAG, "开始录音，类型: $recordingType")
+    
     // 首先设置为Loading状态
     uiState.tryEmit(key, HomeUiState.Loading)
     
     recordingJob = viewModelScope.launch {
       try {
-        val audioFlow = audioRecorder.startRecording()
+        val audioFlow = currentAudioRecorder.startRecording()
         
         // 先设置录音状态，但还不更新UI状态
         _isRecording.value = true
@@ -233,13 +259,97 @@ class VoiceRecognitionViewModel @Inject constructor(
     }
   }
   
+  /**
+   * 同时启动系统上行和下行通道的录音并分别识别
+   */
+  private fun startSystemCallRecording() {
+    Log.d(TAG, "开始系统通话录音（同时监听上下行）")
+    
+    // 首先设置为Loading状态
+    uiState.tryEmit(key, HomeUiState.Loading)
+    
+    recordingJob = viewModelScope.launch {
+      try {
+        // 只有首次启动录音时清空消息列表，后台返回前台时不清空
+        if (!_isInBackground.value) {
+          _recognitionMessages.value = emptyList() 
+        }
+        
+        // 设置录音状态
+        _isRecording.value = true
+        
+        // 启动上行通道录音和识别
+        val uplinkJob = launch {
+          try {
+            val uplinkAudioFlow = uplinkAudioRecorder.startRecording()
+            speechRecognitionApi.streamAudioForRecognition(uplinkAudioFlow)
+              .onEach { result ->
+                // 强制设置上行通道的识别结果角色ID为1（我方）
+                val newMessage = RecognitionMessage(
+                  speakerId = 1, // 固定为角色1 - 我方
+                  text = result.text,
+                  sentenceId = result.sentenceId,
+                  beginTime = result.beginTime
+                )
+                updateOrAddMessage(newMessage)
+                
+                // 如果在后台模式，实时更新浮窗文本
+                if (_isInBackground.value) {
+                  FloatingWindowManager.updateRecognizedText(result.text)
+                }
+              }
+              .launchIn(this)
+          } catch (e: Exception) {
+            Log.e(TAG, "上行通道录音错误", e)
+          }
+        }
+        
+        // 启动下行通道录音和识别
+        val downlinkJob = launch {
+          try {
+            val downlinkAudioFlow = downlinkAudioRecorder.startRecording()
+            speechRecognitionApi.streamAudioForRecognition(downlinkAudioFlow)
+              .onEach { result ->
+                // 强制设置下行通道的识别结果角色ID为2（对方）
+                val newMessage = RecognitionMessage(
+                  speakerId = 2, // 固定为角色2 - 对方
+                  text = result.text,
+                  sentenceId = result.sentenceId,
+                  beginTime = result.beginTime
+                )
+                updateOrAddMessage(newMessage)
+              }
+              .launchIn(this)
+          } catch (e: Exception) {
+            Log.e(TAG, "下行通道录音错误", e)
+          }
+        }
+        
+        // 简单地等待3秒，让Loading状态显示足够长时间
+        delay(3000)
+        
+        // 3秒后设置为Recording状态
+        Log.d(TAG, "Loading状态维持3秒后，切换到Recording状态")
+        uiState.tryEmit(key, HomeUiState.Recording)
+        
+      } catch (e: Exception) {
+        Log.e(TAG, "系统通话录音错误", e)
+        uiState.tryEmit(key, HomeUiState.Error(e.message))
+        _isRecording.value = false
+      }
+    }
+  }
+  
   fun stopRecording() {
     if (!_isRecording.value) return
     recordingJob?.cancel()
     recordingJob = null
     viewModelScope.launch {
       try {
-        audioRecorder.stopRecording()
+        // 尝试停止所有可能的录音器
+        try { micAudioRecorder.stopRecording() } catch (e: Exception) { }
+        try { uplinkAudioRecorder.stopRecording() } catch (e: Exception) { }
+        try { downlinkAudioRecorder.stopRecording() } catch (e: Exception) { }
       } finally {
         _isRecording.value = false
         uiState.tryEmit(key, HomeUiState.Idle)
@@ -320,17 +430,36 @@ class VoiceRecognitionViewModel @Inject constructor(
     super.onCleared()
     recordingJob?.cancel()
     viewModelScope.launch {
-      if (audioRecorder.isRecording()) {
-        audioRecorder.stopRecording()
-      }
+      // 停止所有可能的录音器
+      try { micAudioRecorder.stopRecording() } catch (e: Exception) { }
+      try { uplinkAudioRecorder.stopRecording() } catch (e: Exception) { }
+      try { downlinkAudioRecorder.stopRecording() } catch (e: Exception) { }
     }
   }
 }
 
 @Stable
-internal sealed interface HomeUiState {
+sealed interface HomeUiState {
   data object Idle : HomeUiState
   data object Loading : HomeUiState
   data object Recording : HomeUiState
   data class Error(val message: String?) : HomeUiState
+}
+
+// 添加录音类型枚举
+enum class RecordingType {
+  MICROPHONE,       // 麦克风录音
+  SYSTEM_CALL,      // 系统通话音频(同时监听上下行)
+  SYSTEM_UPLINK,    // 系统上行音频（自己的声音）- 内部使用
+  SYSTEM_DOWNLINK   // 系统下行音频（对方的声音）- 内部使用
+}
+
+// 添加扩展函数
+fun HomeUiState.toString(): String {
+  return when (this) {
+    is HomeUiState.Idle -> "Idle"
+    is HomeUiState.Loading -> "Loading"
+    is HomeUiState.Recording -> "Recording"
+    is HomeUiState.Error -> "Error"
+  }
 }
