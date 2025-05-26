@@ -17,10 +17,14 @@
 package com.skydoves.pokedex.compose.feature.home
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
+import android.os.IBinder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.Stable
@@ -55,7 +59,7 @@ class VoiceRecognitionViewModel @Inject constructor(
   private val speechRecognitionApi: SpeechRecognitionApi,
   private val sessionRepository: SessionRepository,
   @ApplicationContext private val context: Context
-) : BaseViewModel() {
+) : BaseViewModel(), VoiceRecognitionService.ServiceCallback {
   companion object{
     private const val TAG="VoiceRecognitionViewModel"
     // Define Speaker IDs consistently
@@ -95,10 +99,25 @@ class VoiceRecognitionViewModel @Inject constructor(
   private val _permissionState = MutableStateFlow(PermissionState.UNKNOWN)
   val permissionState: StateFlow<PermissionState> = _permissionState
   
-  private var recordingJob: Job? = null
+  // 服务连接相关
+  private var voiceRecognitionService: VoiceRecognitionService? = null
+  private var isServiceBound = false
   
-  // 当前使用的录音器
-  private var currentAudioRecorder: AudioRecorder = micAudioRecorder
+  private val serviceConnection = object : ServiceConnection {
+    override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+      val binder = service as VoiceRecognitionService.LocalBinder
+      voiceRecognitionService = binder.getService()
+      voiceRecognitionService?.setServiceCallback(this@VoiceRecognitionViewModel)
+      isServiceBound = true
+      Log.d(TAG, "服务已连接")
+    }
+    
+    override fun onServiceDisconnected(name: ComponentName?) {
+      voiceRecognitionService = null
+      isServiceBound = false
+      Log.d(TAG, "服务已断开")
+    }
+  }
   
   init {
     // 将自身注册到Application中供全局访问
@@ -121,12 +140,82 @@ class VoiceRecognitionViewModel @Inject constructor(
     checkPermissions()
     Log.d(TAG, "VoiceRecognitionViewModel初始化，权限状态: ${_permissionState.value}")
     
+    // 绑定服务
+    bindToService()
+    
     // Listen to recognitionMessages changes to update aggregated messages
     viewModelScope.launch {
       _recognitionMessages.collect { messages ->
         _aggregatedMessages.value = aggregateMessages(messages)
         Log.d(TAG, "聚合消息: 原始消息=${messages.joinToString { it.text }}, 聚合后消息=${_aggregatedMessages.value.joinToString { it.text }}")
       }
+    }
+  }
+  
+  // 实现ServiceCallback接口
+  override fun onRecognitionResult(result: RecognitionResult) {
+    val newMessage = RecognitionMessage(
+      speakerId = result.speakerId, 
+      text = result.text, 
+      sentenceId = result.sentenceId,
+      beginTime = result.beginTime
+    )
+    updateOrAddMessage(newMessage)
+    
+    // 保存识别消息到数据库
+    _currentSessionId.value?.let { sessionId ->
+      viewModelScope.launch {
+        sessionRepository.addRecognitionMessage(
+          sessionId = sessionId,
+          speakerId = result.speakerId,
+          text = result.text,
+          sentenceId = result.sentenceId,
+          beginTime = result.beginTime
+        )
+      }
+    }
+    
+    // 如果在后台模式，实时更新浮窗文本
+    if (_isInBackground.value) {
+      FloatingWindowManager.updateRecognizedText(result.text)
+    }
+  }
+  
+  override fun onRecordingStateChanged(isRecording: Boolean) {
+    _isRecording.value = isRecording
+    
+    if (isRecording) {
+      // 只有首次启动录音时清空消息列表，后台返回前台时不清空
+      if (!_isInBackground.value) {
+        _recognitionMessages.value = emptyList() 
+      }
+    }
+    
+    uiState.tryEmit(key, if (isRecording) HomeUiState.Recording else HomeUiState.Idle)
+  }
+  
+  override fun onError(error: String) {
+    uiState.tryEmit(key, HomeUiState.Error(error))
+    _isRecording.value = false
+    
+    // 结束会话并标记为错误
+    _currentSessionId.value?.let { sessionId ->
+      viewModelScope.launch {
+        sessionRepository.endSession(sessionId, "ERROR")
+      }
+    }
+  }
+  
+  private fun bindToService() {
+    val intent = Intent(context, VoiceRecognitionService::class.java)
+    context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+  }
+  
+  private fun unbindFromService() {
+    if (isServiceBound) {
+      voiceRecognitionService?.setServiceCallback(null)
+      context.unbindService(serviceConnection)
+      isServiceBound = false
     }
   }
   
@@ -211,8 +300,17 @@ class VoiceRecognitionViewModel @Inject constructor(
         _currentSessionId.value = sessionId
         Log.d(TAG, "创建新会话: $sessionId, 录音类型: ${recordingType.name}")
         
-        // 会话创建成功后开始录音
-        startRecordingWithSession(recordingType)
+        // 通过服务开始录音
+        VoiceRecognitionService.startRecording(context, recordingType)
+        
+        // 简单地等待3秒，让Loading状态显示足够长时间
+        delay(3000)
+        
+        // 3秒后如果还在录音，设置为Recording状态
+        if (_isRecording.value) {
+          Log.d(TAG, "Loading状态维持3秒后，切换到Recording状态")
+          uiState.tryEmit(key, HomeUiState.Recording)
+        }
         
       } catch (e: Exception) {
         Log.e(TAG, "创建会话失败", e)
@@ -221,199 +319,13 @@ class VoiceRecognitionViewModel @Inject constructor(
     }
   }
   
-  private suspend fun startRecordingWithSession(recordingType: RecordingType) {
-    // 系统通话录音需要特殊处理（同时监听上下行）
-    if (recordingType == RecordingType.SYSTEM_CALL) {
-      startSystemCallRecording()
-      return
-    }
-    
-    // 设置当前录音器
-    currentAudioRecorder = when (recordingType) {
-      RecordingType.MICROPHONE -> micAudioRecorder
-      RecordingType.SYSTEM_UPLINK -> uplinkAudioRecorder
-      RecordingType.SYSTEM_DOWNLINK -> downlinkAudioRecorder
-      RecordingType.SYSTEM_CALL -> micAudioRecorder // 不会执行到这里
-    }
-    
-    Log.d(TAG, "开始录音，类型: $recordingType")
-    
-    recordingJob = viewModelScope.launch {
-      try {
-        val audioFlow = currentAudioRecorder.startRecording()
-        
-        // 先设置录音状态，但还不更新UI状态
-        _isRecording.value = true
-        
-        // 只有首次启动录音时清空消息列表，后台返回前台时不清空
-        if (!_isInBackground.value) {
-          _recognitionMessages.value = emptyList() 
-        }
-        
-        // 启动语音识别
-        speechRecognitionApi.streamAudioForRecognition(audioFlow)
-          .onEach { result ->
-            val newMessage = RecognitionMessage(
-              speakerId = result.speakerId, 
-              text = result.text, 
-              sentenceId = result.sentenceId,
-              beginTime = result.beginTime
-            )
-            updateOrAddMessage(newMessage)
-            
-            // 保存识别消息到数据库
-            _currentSessionId.value?.let { sessionId ->
-              sessionRepository.addRecognitionMessage(
-                sessionId = sessionId,
-                speakerId = result.speakerId,
-                text = result.text,
-                sentenceId = result.sentenceId,
-                beginTime = result.beginTime
-              )
-            }
-            
-            // 如果在后台模式，实时更新浮窗文本
-            if (_isInBackground.value) {
-              FloatingWindowManager.updateRecognizedText(result.text)
-            }
-          }
-          .launchIn(this)
-        
-        // 简单地等待3秒，让Loading状态显示足够长时间
-        delay(3000)
-        
-        // 3秒后设置为Recording状态
-        Log.d(TAG, "Loading状态维持3秒后，切换到Recording状态")
-        uiState.tryEmit(key, HomeUiState.Recording)
-        
-      } catch (e: Exception) {
-        Log.e(TAG,"record error",e)
-        uiState.tryEmit(key, HomeUiState.Error(e.message))
-        _isRecording.value = false
-        
-        // 结束会话并标记为错误
-        _currentSessionId.value?.let { sessionId ->
-          sessionRepository.endSession(sessionId, "ERROR")
-        }
-      }
-    }
-  }
-  
-  /**
-   * 同时启动系统上行和下行通道的录音并分别识别
-   */
-  private suspend fun startSystemCallRecording() {
-    Log.d(TAG, "开始系统通话录音（同时监听上下行）")
-    
-    recordingJob = viewModelScope.launch {
-      try {
-        // 只有首次启动录音时清空消息列表，后台返回前台时不清空
-        if (!_isInBackground.value) {
-          _recognitionMessages.value = emptyList() 
-        }
-        
-        // 设置录音状态
-        _isRecording.value = true
-        
-        // 启动上行通道录音和识别
-        val uplinkJob = launch {
-          try {
-            val uplinkAudioFlow = uplinkAudioRecorder.startRecording()
-            speechRecognitionApi.streamAudioForRecognition(uplinkAudioFlow)
-              .onEach { result ->
-                // 强制设置上行通道的识别结果角色ID为1（我方）
-                val newMessage = RecognitionMessage(
-                  speakerId = 1, // 固定为角色1 - 我方
-                  text = result.text,
-                  sentenceId = result.sentenceId,
-                  beginTime = result.beginTime
-                )
-                updateOrAddMessage(newMessage)
-                
-                // 保存识别消息到数据库
-                _currentSessionId.value?.let { sessionId ->
-                  sessionRepository.addRecognitionMessage(
-                    sessionId = sessionId,
-                    speakerId = 1,
-                    text = result.text,
-                    sentenceId = result.sentenceId,
-                    beginTime = result.beginTime
-                  )
-                }
-                
-                // 如果在后台模式，实时更新浮窗文本
-                if (_isInBackground.value) {
-                  FloatingWindowManager.updateRecognizedText(result.text)
-                }
-              }
-              .launchIn(this)
-          } catch (e: Exception) {
-            Log.e(TAG, "上行通道录音错误", e)
-          }
-        }
-        
-        // 启动下行通道录音和识别
-        val downlinkJob = launch {
-          try {
-            val downlinkAudioFlow = downlinkAudioRecorder.startRecording()
-            speechRecognitionApi.streamAudioForRecognition(downlinkAudioFlow)
-              .onEach { result ->
-                // 强制设置下行通道的识别结果角色ID为2（对方）
-                val newMessage = RecognitionMessage(
-                  speakerId = 2, // 固定为角色2 - 对方
-                  text = result.text,
-                  sentenceId = result.sentenceId,
-                  beginTime = result.beginTime
-                )
-                updateOrAddMessage(newMessage)
-                
-                // 保存识别消息到数据库
-                _currentSessionId.value?.let { sessionId ->
-                  sessionRepository.addRecognitionMessage(
-                    sessionId = sessionId,
-                    speakerId = 2,
-                    text = result.text,
-                    sentenceId = result.sentenceId,
-                    beginTime = result.beginTime
-                  )
-                }
-              }
-              .launchIn(this)
-          } catch (e: Exception) {
-            Log.e(TAG, "下行通道录音错误", e)
-          }
-        }
-        
-        // 简单地等待3秒，让Loading状态显示足够长时间
-        delay(3000)
-        
-        // 3秒后设置为Recording状态
-        Log.d(TAG, "Loading状态维持3秒后，切换到Recording状态")
-        uiState.tryEmit(key, HomeUiState.Recording)
-        
-      } catch (e: Exception) {
-        Log.e(TAG, "系统通话录音错误", e)
-        uiState.tryEmit(key, HomeUiState.Error(e.message))
-        _isRecording.value = false
-        
-        // 结束会话并标记为错误
-        _currentSessionId.value?.let { sessionId ->
-          sessionRepository.endSession(sessionId, "ERROR")
-        }
-      }
-    }
-  }
-  
   fun stopRecording() {
     if (!_isRecording.value) return
-    recordingJob?.cancel()
-    recordingJob = null
+    
     viewModelScope.launch {
       try {
-        // 尝试停止所有可能的录音器
-        try { micAudioRecorder.stopRecording() } catch (e: Exception) { }
-        try { uplinkAudioRecorder.stopRecording() } catch (e: Exception) { }
-        try { downlinkAudioRecorder.stopRecording() } catch (e: Exception) { }
+        // 通过服务停止录音
+        VoiceRecognitionService.stopRecording(context)
         
         // 结束当前会话
         _currentSessionId.value?.let { sessionId ->
@@ -421,9 +333,8 @@ class VoiceRecognitionViewModel @Inject constructor(
           Log.d(TAG, "结束会话: $sessionId")
         }
         
-      } finally {
-        _isRecording.value = false
-        uiState.tryEmit(key, HomeUiState.Idle)
+      } catch (e: Exception) {
+        Log.e(TAG, "停止录音失败", e)
       }
     }
   }
@@ -581,13 +492,13 @@ class VoiceRecognitionViewModel @Inject constructor(
   
   override fun onCleared() {
     super.onCleared()
-    recordingJob?.cancel()
     viewModelScope.launch {
-      // 停止所有可能的录音器
-      try { micAudioRecorder.stopRecording() } catch (e: Exception) { }
-      try { uplinkAudioRecorder.stopRecording() } catch (e: Exception) { }
-      try { downlinkAudioRecorder.stopRecording() } catch (e: Exception) { }
+      // 停止录音服务
+      if (_isRecording.value) {
+        VoiceRecognitionService.stopRecording(context)
+      }
     }
+    unbindFromService()
   }
 }
 

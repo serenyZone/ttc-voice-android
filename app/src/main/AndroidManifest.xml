@@ -27,6 +27,9 @@ xmlns:tools="http://schemas.android.com/tools">
     tools:ignore="ScopedStorage" />
 <!-- 悬浮窗权限 -->
 <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+<!-- 前台服务权限 -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
 <application
   android:name=".PokedexApp"
@@ -50,6 +53,13 @@ xmlns:tools="http://schemas.android.com/tools">
       <category android:name="android.intent.category.LAUNCHER" />
     </intent-filter>
   </activity>
+
+  <!-- 语音识别前台服务 -->
+  <service
+    android:name="com.skydoves.pokedex.compose.feature.home.VoiceRecognitionService"
+    android:enabled="true"
+    android:exported="false"
+    android:foregroundServiceType="microphone" />
 
   <!--    <provider-->
   <!--      android:name="androidx.startup.InitializationProvider"-->
